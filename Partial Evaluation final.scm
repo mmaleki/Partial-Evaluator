@@ -1,0 +1,132 @@
+#lang racket
+
+(define (lookup var env)
+  (cadr (assoc var env)))
+
+(define prim-op-table
+  `((add ,(lambda (x y) (+ x y)))
+    (sub ,(lambda (x y) (- x y)))
+    (mul ,(lambda (x y) (* x y)))
+    (equal ,eq?)))
+
+(define (primop? op)
+  (cond ((assoc op prim-op-table) => cadr)
+        (else #f)))
+
+(define (primapply op ls)
+  (cond ((primop? op) => (lambda (o) (apply o ls)))))
+
+(define (closure? f)
+  (and (pair? f) (equal? (car f) 'closure)))
+
+(define (augment-env param args env)
+  (append (map list param args) env))
+  
+
+(define (ev0 ex env)
+  (cond ((symbol? ex) (lookup ex env))
+        ((number? ex) ex)
+        ((eq? ex #t) #t)
+        ((eq? ex #f) #f)
+        ((pair? ex)
+         (cond ((primop? (car ex))
+                (cond ((eq? (car ex) 'equal)
+                       (let ((first (cadr ex)) (second (caddr ex)))
+                         (if (eq? (ev0 first env) (ev0 second env))
+                              #t
+                              #f)))
+                      (else
+                       (let ((op (car (assoc (car ex) prim-op-table))))
+                         (cond ((eq? (car ex) op)
+                                (let ((fst (cadr ex)) (snd (caddr ex)))
+                                  (cond ((and (number? fst) (number? snd))
+                                         (primapply op (list fst snd)))
+                                        (else
+                                         (primapply op (list (ev0 fst env) (ev0 snd env))))))))))))
+               ((eq? (car ex) 'IF)
+                (let ((a (cadr ex))
+                      (b (caddr ex))
+                      (c (cadddr ex)))
+                  (if (ev0 a env)
+                      (ev0 b env)
+                      (ev0 c env))))
+               ((eq? (car ex) 'lamb)
+                (list 'closure (cadr ex) (caddr ex) env))
+               ((eq? (car ex) 'AP)
+                (cond ((closure? (ev0 (cadr ex) env))
+                       (cond ((number? (caaddr ex))
+                              (ev0 (car (cddadr ex)) (augment-env (cadadr ex) (caddr ex) env)))
+                             (else (ev0 (car (cddadr ex)) (augment-env (cadadr ex) (ev0 (caddr ex) env) env)))))))
+               (else (error "bad expression" ex))))))
+
+(define (ap f args)
+  (cond ((closure? f)
+	 (let ((formals (cadr f))
+	       (body (caddr f))
+	       (env (cadddr f)))
+	   (ev0 body (augment-env formals args env))))
+	((primop? f) => (λ (o) (apply o args)))))
+
+
+(define (pe0 ex env)
+  (cond ((symbol? ex)
+         (cond ((assoc ex env)
+                (lookup ex env))
+               (else ex)))
+        ((number? ex) ex)
+        ((eq? ex #t) #t)
+        ((eq? ex #f) #f)
+        ((pair? ex)
+         (cond ((primop? (car ex))
+                 (cond ((eq? (car ex) 'equal)
+                       (let ((first (pe0 (cadr ex) env)) (second (pe0 (caddr ex) env)))
+                         (if (and (number? first) (number? second))
+                             (if (eq? first second)
+                                 #t
+                                 #f)
+                             (cons (car ex) (list first second)))))
+                       (else
+                        (let ((op (car (assoc (car ex) prim-op-table))))
+                          (cond ((eq? (car ex) op)
+                                 (let ((fst (pe0 (cadr ex) env)) (snd (pe0 (caddr ex) env)))
+                                   (cond ((and (number? fst) (number? snd))
+                                          (primapply op (list fst snd)))
+                                         (else
+                                          (cons op (list (pe0 fst env) (pe0 snd env))))))))))))
+               ((eq? (car ex) 'IF)
+                (let ((a (cadr ex))
+                      (b (caddr ex))
+                      (c (cadddr ex)))
+                  (let ((r (pe0 a env)))
+                    (if (boolean? r)
+                        (if r
+                            (pe0 b env)
+                            (pe0 c env))
+                        (list 'IF r (pe0 b env) (pe0 c env))))))
+                ((eq? (car ex) 'lamb)
+                (list 'closure (cadr ex) (caddr ex) env))
+                ((eq? (car ex) 'AP)
+                 (cond ((closure? (pe0 (cadr ex) env))
+                        (cond ((number? (caaddr ex))
+                               (pe0 (car (cddadr ex)) (augment-env (cadadr ex) (caddr ex) env)))
+                              (else (pe0 (car (cddadr ex)) (augment-env (cadadr ex) (pe0 (caddr ex) env) env)))))))
+                (else (error "bad expression" ex))))))
+
+;;; (pe0 '(add (mul x y) z) '((x 3) (z 4)))
+;;;'(add (mul 3 y) 4)
+;;;> (pe0 '(add (mul 3 4) z) '())
+;;;'(add 12 z)
+
+;;;> (pe0 '(IF (equal x y) (add x z) (mul y z)) '((x 3) (y 4)))
+;;;'(mul 4 z)
+;;;> (pe0 '(IF (equal x y) (add x z) (mul y z)) '((x 3) (y 3)))
+;;;'(add 3 z)
+
+;;;> (pe0 '(IF (equal x y) (add w z) (mul (mul x y) w)) '((x 3) (y 4)))
+;;;'(mul 12 w)
+
+;;;> (pe0 '(IF (equal x y) (IF (equal x z) (mul (mul x z) w) (add x r)) (add x y)) '((x 2) (y 2) (z 2)))
+;;;'(mul 4 w)
+
+;;;(pe0 '(AP (lamb (x) (add x y)) (4)) '())
+;;;'(add 4 y)
